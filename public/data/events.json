@@ -1,0 +1,23 @@
+[
+  {
+    "city": "Aracaju",
+    "title": "Circuito Orla — Corrida de Rua",
+    "start": "2025-11-16",
+    "end": "2025-11-16",
+    "factor": 0.10
+  },
+  {
+    "city": "Aracaju",
+    "title": "Festival Gastronômico de Sergipe",
+    "start": "2025-11-20",
+    "end": "2025-11-22",
+    "factor": 0.15
+  },
+  {
+    "city": "Aracaju",
+    "title": "Réveillon na Orla de Atalaia",
+    "start": "2025-12-30",
+    "end": "2026-01-01",
+    "factor": 0.30
+  }
+]
