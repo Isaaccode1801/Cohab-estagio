@@ -1,46 +1,27 @@
 import React, { useMemo, useState } from "react";
 import LeadForm from "./components/LeadForm.jsx";
 
-
-// --- Quick, single-file React prototype ---
-// How to use locally (fast):
-// 1) npm create vite@latest temporada-lite -- --template react
-// 2) cd temporada-lite && npm install && npm i date-fns
-// 3) Replace src/App.jsx with this file's content
-// 4) npm run dev
-//
-// Notes:
-// - Pure Tailwind utility classes are used for styling; if you don't want Tailwind,
-//   it still looks fine with default styles. (Optional: add Tailwind later.)
-// - Mock data is included (listings + simple event calendar) so there's no backend.
-// - Two main flows per the challenge: "Explorar" (guest-like search) and
-//   "Painel do Proprietário" (owner-first pricing + 30d revenue potential).
-// - Multi-agency support via "operadora" filter in both screens.
-
 // ------------------------------------------------------------
-// Helpers / Domain logic (transparent, owner-first)
+// Helpers / Domain logic
 // ------------------------------------------------------------
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 
-// very small weekday factor (Fri/Sat slightly higher)
 function weekdayFactor(date) {
   const d = new Date(date).getDay(); // 0=Sun..6=Sat
   if (d === 5 || d === 6) return 1.12; // Fri/Sat
-  if (d === 0) return 1.05; // Sun
-  return 1.0; // Mon-Thu
+  if (d === 0) return 1.05;            // Sun
+  return 1.0;                          // Mon-Thu
 }
 
-// simple seasonal factor by month (Brazilian summer bump)
 function seasonalFactor(date) {
-  const m = new Date(date).getMonth(); // 0=Jan..11=Dec
+  const m = new Date(date).getMonth(); // 0..11
   const summer = [11, 0, 1]; // Dec/Jan/Feb
-  const winter = [5, 6]; // Jun/Jul (mild drop)
+  const winter = [5, 6];     // Jun/Jul
   if (summer.includes(m)) return 1.18;
   if (winter.includes(m)) return 0.95;
   return 1.0;
 }
 
-// lead time factor: closer = small markdown, far = light bump
 function leadTimeFactor(leadDays) {
   if (leadDays <= 3) return 0.92;
   if (leadDays <= 7) return 0.97;
@@ -48,7 +29,7 @@ function leadTimeFactor(leadDays) {
   return 1.0;
 }
 
-// Event factor from curated events (per city). For MVP: word‑match on title.
+// Event factor default (mantém compatibilidade caso você use events locais)
 function eventFactorForDate(dateStr, city, events = []) {
   const d = new Date(dateStr).toISOString().slice(0, 10);
   const e = events.find(
@@ -70,8 +51,9 @@ function dynamicPriceForDate({ base, date, city, min = 120, max = 1800, events }
   return Math.round(clamp(price, min, max));
 }
 
-// Occupancy estimation (transparent heuristic)
-// From a fake 30d availability calendar: count unavailable/occupied as booked.
+// ------------------------------------------------------------
+// Extras: ocupação e receita potencial (30 dias)
+// ------------------------------------------------------------
 function occupancy30(listing) {
   const days = listing.calendar30 || [];
   const total = days.length || 30;
@@ -92,15 +74,14 @@ function revenuePotential30(listing, events) {
       min: listing.minPrice || 120,
       max: listing.maxPrice || 1800,
     });
-    // Assume we only earn revenue if the day is (or will be) occupied.
-    const occupied = d.status === "ocupado" ? 1 : 0; // MVP simplification
+    const occupied = d.status === "ocupado" ? 1 : 0;
     sum += occupied * price;
   });
   return Math.round(sum);
 }
 
 // ------------------------------------------------------------
-// Data source (JSON in /public/data) — with graceful fallback to mocks
+// Data (mocks) + loader
 // ------------------------------------------------------------
 import { useEffect } from "react";
 
@@ -126,11 +107,6 @@ const FALLBACK_LISTINGS = [
   { id: "AJU-2211", title: "Casa 3Q Próx. Orla de Atalaia", photo: "https://images.unsplash.com/photo-1576941089067-2de3c901e126?q=80&w=1200&auto=format&fit=crop", city: "Aracaju",  neighborhood: "Atalaia", type: "Casa", agency: "ImobX", basePrice: 500, minPrice: 260, maxPrice: 1800, calendar30: makeCalendar30() },
 ];
 
-// Load from /public/data/*.json so you can swap city/region without code changes
-// Expected files:
-// public/data/listings.json  -> array of listings (same shape as FALLBACK_LISTINGS)
-// public/data/events.json    -> array of events (same shape as FALLBACK_EVENTS)
-
 function useData() {
   const [listings, setListings] = React.useState([]);
   const [events, setEvents] = React.useState([]);
@@ -153,13 +129,13 @@ function useData() {
             fetch(`${base}data/listings.json`),
             fetch(`${base}data/events.json`)
           ]);
-          setListings(lRes.ok ? await lRes.json() : []);
-          setEvents(eRes.ok ? await eRes.json() : []);
+          setListings(lRes.ok ? await lRes.json() : FALLBACK_LISTINGS);
+          setEvents(eRes.ok ? await eRes.json() : FALLBACK_EVENTS);
         }
       } catch (e) {
         console.error("load error", e);
-        setListings([]);
-        setEvents([]);
+        setListings(FALLBACK_LISTINGS);
+        setEvents(FALLBACK_EVENTS);
       } finally {
         setLoading(false);
       }
@@ -174,7 +150,6 @@ function useData() {
 
   return { listings, events, loading, neighborhoods, types, agencies, cities };
 }
-
 
 // ------------------------------------------------------------
 // UI building blocks
@@ -318,18 +293,50 @@ function ExploreScreen() {
 function OwnerScreen() {
   const { listings, events, loading } = useData();
 
-  // 1) estados SEMPRE declarados no topo (ordem fixa)
+  // 🔹 carrega feriados do backend
+// 🔹 carrega feriados do backend
+const [holidays, setHolidays] = React.useState([]); // [{date, reason, boost}]
+
+React.useEffect(() => {
+  (async () => {
+    try {
+      const calId = "pt-br.brazilian#holiday@group.v.calendar.google.com";
+      const r = await fetch(
+        `/api/holidays?days=180&boost=0.2&calendarId=${encodeURIComponent(calId)}`
+      );
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        console.error("[holidays] backend error:", r.status, data);
+        setHolidays([]);
+        return;
+      }
+      console.log("[holidays] carregados:", (data?.items || []).length, data);
+      setHolidays(Array.isArray(data?.items) ? data.items : []);
+    } catch (e) {
+      console.error("[holidays] falha de rede:", e);
+      setHolidays([]);
+    }
+  })();
+}, []);
+
+
+  // acesso O(1) por data
+  const holidayByDate = React.useMemo(() => {
+    const m = new Map();
+    for (const h of holidays) m.set(h.date, h);
+    return m;
+  }, [holidays]);
+
+  // estados principais
   const [selectedId, setSelectedId] = React.useState(null);
   const [base, setBase] = React.useState(0);
 
-  // 2) inicializa seleção quando dados chegarem (não cria hooks novos)
   React.useEffect(() => {
     if (!loading && listings.length > 0 && !selectedId) {
       setSelectedId(listings[0].id);
     }
   }, [loading, listings, selectedId]);
 
-  // 3) item selecionado e sincronismo do preço base
   const selected = React.useMemo(
     () => listings.find(l => l.id === selectedId) || null,
     [listings, selectedId]
@@ -339,66 +346,60 @@ function OwnerScreen() {
     if (selected) setBase(selected.basePrice || 200);
   }, [selected]);
 
-  // 4) dias e linhas calculadas (sempre com fallback)
   const days = React.useMemo(
     () => (selected && Array.isArray(selected.calendar30) ? selected.calendar30 : []),
     [selected]
   );
 
-const rows = React.useMemo(() => {
-  if (!selected) return [];
-  // preço com base ORIGINAL (referência) – para medir elasticidade
-  const refPriceFor = (date) =>
-    dynamicPriceForDate({
-      base: selected.basePrice, // base original do imóvel
-      date,
-      city: selected.city,
-      events,
-      min: selected.minPrice,
-      max: selected.maxPrice,
+  const rows = React.useMemo(() => {
+    if (!selected) return [];
+
+    const refPriceFor = (date) =>
+      dynamicPriceForDate({
+        base: selected.basePrice,
+        date,
+        city: selected.city,
+        events,
+        min: selected.minPrice,
+        max: selected.maxPrice,
+      });
+
+    return days.map((d) => {
+      const holiday = holidayByDate.get(d.date);          // {date, reason, boost}
+      const extraFactor = holiday ? (1 + (holiday.boost ?? 0.2)) : 1.0;
+
+      const priceBase = dynamicPriceForDate({
+        base: base || selected.basePrice,
+        date: d.date,
+        city: selected.city,
+        events,
+        min: selected.minPrice,
+        max: selected.maxPrice,
+      });
+
+      const price = Math.round(priceBase * extraFactor);
+
+      // probabilidade simples
+      const p0 = d.status === "ocupado" ? 0.85 : 0.35;
+      const pRef = (refPriceFor(d.date) || price || 1);
+      const elasticity = 1.2;
+      const priceFactor = Math.pow(pRef / Math.max(price, 1), elasticity);
+      const prob = Math.max(0.05, Math.min(0.98, p0 * priceFactor));
+
+      return { ...d, price, prob, reason: holiday?.reason || "", boost: holiday?.boost ?? 0 };
     });
+  }, [days, base, selected, events, holidayByDate]);
 
-  return days.map((d) => {
-    const price = dynamicPriceForDate({
-      base: base || selected.basePrice, // base ajustável pelo proprietário
-      date: d.date,
-      city: selected.city,
-      events,
-      min: selected.minPrice,
-      max: selected.maxPrice,
-    });
+  const occ = React.useMemo(() => {
+    if (!rows.length) return 0;
+    const avg = rows.reduce((acc, r) => acc + r.prob, 0) / rows.length;
+    return avg;
+  }, [rows]);
 
-    // --- Modelo simples de probabilidade (elasticidade-preço) ---
-    // 1) probabilidade "base" do dia, inferida do status do calendário original
-    //    (ocupado = 0.85, livre = 0.35) – números razoáveis para demo
-    const p0 = d.status === "ocupado" ? 0.85 : 0.35;
+  const potential = React.useMemo(() => {
+    return rows.reduce((acc, r) => acc + r.price * r.prob, 0);
+  }, [rows]);
 
-    // 2) ajuste por diferença de preço vs. referência (quanto ↑ preço, ↓ prob)
-    const pRef = refPriceFor(d.date) || price || 1;
-    const elasticity = 1.2; // sensibilidade (ajuste se quiser)
-    // Ex.: se preço atual > preço ref, fator < 1; se menor, fator > 1
-    const priceFactor = Math.pow(pRef / Math.max(price, 1), elasticity);
-
-    // 3) clamp em [0.05, 0.98] para evitar 0/1 gélidos
-    const prob = Math.max(0.05, Math.min(0.98, p0 * priceFactor));
-
-    return { ...d, price, prob };
-  });
-}, [days, base, selected, events]);
-
-
-const occ = React.useMemo(() => {
-  if (!rows.length) return 0;
-  const avg = rows.reduce((acc, r) => acc + r.prob, 0) / rows.length;
-  return avg; // 0..1
-}, [rows]);
-
-const potential = React.useMemo(() => {
-  return rows.reduce((acc, r) => acc + r.price * r.prob, 0);
-}, [rows]);
-
-
-  // 5) Renders de carregamento/sem dados — APÓS declarar todos os hooks acima
   if (loading) return <div>Carregando dados…</div>;
   if (!listings.length) return <div>Nenhuma unidade encontrada. Verifique public/data/listings.json.</div>;
   if (!selected) return <div>Selecionando unidade…</div>;
@@ -439,34 +440,44 @@ const potential = React.useMemo(() => {
 
       <div className="overflow-x-auto rounded-2xl border">
         <table className="w-full text-sm">
-      <thead className="bg-gray-50">
-        <tr>
-          <th className="p-2 text-left">Data</th>
-          <th className="p-2 text-left">Status</th>
-          <th className="p-2 text-left">Preço recomendado</th>
-          <th className="p-2 text-left">% Ocupação (sim.)</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => (
-          <tr key={r.date} className="border-t">
-            <td className="p-2">{r.date}</td>
-            <td className="p-2 capitalize">{r.status}</td>
-            <td className="p-2">R$ {r.price}</td>
-            <td className="p-2">{(r.prob * 100).toFixed(0)}%</td>
-          </tr>
-        ))}
-      </tbody>
+<thead className="bg-gray-50">
+  <tr>
+    <th className="p-2 text-left">Data</th>
+    <th className="p-2 text-left">Status</th>
+    <th className="p-2 text-left">Preço recomendado</th>
+    <th className="p-2 text-left">% Ocupação (sim.)</th>
+    <th className="p-2 text-left">Motivo</th>
+  </tr>
+</thead>
+
+<tbody>
+  {rows.map((r) => (
+    <tr key={r.date} className="border-t">
+      <td className="p-2">
+        {r.date}
+        {r.reason && (
+          <span className="ml-2 inline-block text-xs px-2 py-0.5 rounded bg-yellow-100 text-yellow-800 border border-yellow-200">
+            {r.reason} · +{Math.round((r.boost || 0.2) * 100)}%
+          </span>
+        )}
+      </td>
+      <td className="p-2 capitalize">{r.status}</td>
+      <td className="p-2">R$ {r.price}</td>
+      <td className="p-2">{(r.prob * 100).toFixed(0)}%</td>
+      <td className="p-2">{r.reason || "-"}</td>
+    </tr>
+  ))}
+</tbody>
+
         </table>
       </div>
 
       <div className="text-xs text-gray-500">
-        Fórmula: price = base × weekday × season × lead × event (clamp min/max).
+        Fórmula: price = base × weekday × season × lead × event × (feriado? +boost : 1) (clamp min/max).
       </div>
     </div>
   );
 }
-
 
 // ------------------------------------------------------------
 // App shell
@@ -474,7 +485,6 @@ const potential = React.useMemo(() => {
 export default function App() {
   const [page, setPage] = React.useState("explore"); // "explore" | "owner" | "lead"
 
-  // (opcional) abrir direto pela URL: #explore, #owner, #lead
   React.useEffect(() => {
     const hash = (window.location.hash || "").replace("#", "");
     if (["explore","owner","lead"].includes(hash)) setPage(hash);
@@ -488,11 +498,14 @@ export default function App() {
       <header className="sticky top-0 z-10 bg-white/70 backdrop-blur border-b">
         <div className="max-w-6xl mx-auto p-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-xl bg-blue-600" />
-            <div className="font-bold">Cohab — Temporada Lite</div>
+            <img
+              src="/cohab-logo.png"
+              alt="Cohab Premium"
+              className="h-8 w-9 rounded-xl object-contain bg-white"
+            />
+            <div className="font-bold">Cohab — Temporada</div>
           </div>
 
-          {/* Navegação por personas */}
           <nav className="flex items-center gap-2">
             <button
               onClick={() => setPage("explore")}
