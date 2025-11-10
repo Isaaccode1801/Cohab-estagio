@@ -1,31 +1,26 @@
-// api/holidays.js  (ESM)
-// Lê feriados de um calendário público do Google e devolve [{date, reason, boost}]
-import fetch from "node-fetch";
-
-function toISODate(d) {
-  return new Date(d).toISOString().slice(0, 10);
-}
-
+// api/holidays.js
 export default async function handler(req, res) {
-  // CORS (se precisar chamar do vite)
+  // CORS básico (seguro deixar)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "GET") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
+  if (req.method !== "GET") {
+    return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
+  }
 
   try {
     const {
-      calendarId = "pt.brazil#holiday@group.v.calendar.google.com",
-      days = "180",
+      calendarId = "pt-br.brazilian#holiday@group.v.calendar.google.com",
+      days = "365",
       boost = "0.2",
     } = req.query || {};
 
     const key = process.env.GOOGLE_API_KEY;
     if (!key) {
       return res.status(500).json({
-        error: "MISSING_KEY",
-        message: "Defina GOOGLE_API_KEY no .env do servidor.",
+        error: "CONFIG",
+        message: "Defina GOOGLE_API_KEY nas Environment Variables do Vercel.",
       });
     }
 
@@ -33,38 +28,58 @@ export default async function handler(req, res) {
     const timeMin = now.toISOString();
     const timeMax = new Date(now.getTime() + Number(days) * 86400000).toISOString();
 
-    const url =
-      "https://www.googleapis.com/calendar/v3/calendars/" +
-      encodeURIComponent(calendarId) +
-      "/events" +
-      `?singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(timeMin)}` +
-      `&timeMax=${encodeURIComponent(timeMax)}&maxResults=2500&key=${encodeURIComponent(key)}`;
+    // Monta URL base
+    const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(
+      calendarId
+    )}/events`;
+    const makeUrl = (pageToken) => {
+      const u = new URL(base);
+      u.searchParams.set("singleEvents", "true");
+      u.searchParams.set("orderBy", "startTime");
+      u.searchParams.set("timeMin", timeMin);
+      u.searchParams.set("timeMax", timeMax);
+      u.searchParams.set("maxResults", "2500");
+      u.searchParams.set("key", key);
+      if (pageToken) u.searchParams.set("pageToken", pageToken);
+      return u.toString();
+    };
 
-    const r = await fetch(url);
-    const raw = await r.text();
+    let items = [];
+    let pageToken = undefined;
 
-    if (!r.ok) {
-      // Passa o erro da Google para debug
-      return res.status(502).json({ error: "GOOGLE_ERROR", message: raw });
-    }
+    // Paginação da API do Google
+    do {
+      const url = makeUrl(pageToken);
+      const resp = await fetch(url);
+      const data = await resp.json();
 
-    const json = JSON.parse(raw);
-    const items = Array.isArray(json.items) ? json.items : [];
+      if (!resp.ok) {
+        return res.status(resp.status).json({
+          error: "GOOGLE_ERROR",
+          status: resp.status,
+          message: data,
+        });
+      }
 
-    // Normaliza somente all-day (date); ignora eventos com horário (dateTime)
-    const out = items
-      .map((ev) => {
-        const start = ev.start?.date || ev.start?.dateTime;
-        if (!start) return null;
-        const date = toISODate(start);
-        const reason = String(ev.summary || ev.description || "").trim();
-        return { date, reason, boost: Number(boost) };
-      })
-      .filter(Boolean);
+      for (const ev of data.items || []) {
+        const date =
+          ev.start?.date ||
+          (ev.start?.dateTime ? ev.start.dateTime.slice(0, 10) : null);
+        if (!date) continue;
 
-    res.status(200).json({ items: out });
+        items.push({
+          date,                          // "YYYY-MM-DD"
+          reason: ev.summary || "Feriado",
+          boost: Number(boost),          // ex.: 0.2 = +20%
+        });
+      }
+
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+
+    return res.status(200).json({ items });
   } catch (e) {
     console.error("[holidays] fatal:", e);
-    res.status(500).json({ error: "SERVER_ERROR", message: String(e?.message || e) });
+    return res.status(500).json({ error: "SERVER_ERROR", message: e.message });
   }
 }
